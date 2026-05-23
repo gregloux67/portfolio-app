@@ -1,52 +1,34 @@
-// Use native fetch on Node 18+, fallback to node-fetch
 const fetch = globalThis.fetch || require('node-fetch');
 
-const ETF_TICKERS = {
-  pust: "PUST.PA",
-  paeem: "PAEEM.PA",
-  urnu: "URNU.MI",
-  vvmx: "VVMX.DE"
+// Stooq tickers (covers European ETFs)
+const STOOQ_TICKERS = {
+  pust:  "pust.pa",
+  paeem: "paeem.pa",
+  mstr:  "miga.f",
+  urnu:  "urnu.mi",
+  vvmx:  "vvmx.de"
 };
 
 const PRICE_CACHE = {};
 const CACHE_TTL = 300;
 
-async function fetchYahooPrice(ticker) {
+async function fetchStooqPrice(ticker) {
   try {
-    const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=price`;
+    const url = `https://stooq.com/q/l/?s=${ticker}&f=sd2t2ohlcv&h&e=csv`;
     const response = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 5000
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    const data = await response.json();
-    const result = data?.quoteSummary?.result?.[0] || {};
-    const price = result?.price?.regularMarketPrice?.raw || result?.price?.currentPrice?.raw;
-    return price || null;
+    const text = await response.text();
+    // CSV format: Symbol,Date,Time,Open,High,Low,Close,Volume
+    const lines = text.trim().split('\n');
+    if (lines.length < 2) return null;
+    const cols = lines[1].split(',');
+    const close = parseFloat(cols[6]);
+    return close > 0 ? close : null;
   } catch (e) {
-    console.error(`Error fetching Yahoo price for ${ticker}:`, e.message);
+    console.error(`Stooq error for ${ticker}:`, e.message);
     return null;
   }
-}
-
-async function fetchGoogleFinancePrice(ticker) {
-  try {
-    const url = `https://www.google.com/finance/quote/${ticker}`;
-    const response = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 5000
-    });
-    const html = await response.text();
-    const match = html.match(/"regularMarketPrice"\s*:\s*([0-9.]+)/);
-    if (match) return parseFloat(match[1]);
-    const matches = html.match(/([0-9]{1,4}\.[0-9]{2})/g) || [];
-    for (let m of matches) {
-      const val = parseFloat(m);
-      if (val > 0.1) return val;
-    }
-  } catch (e) {
-    console.error(`Error fetching Google price for ${ticker}:`, e.message);
-  }
-  return null;
 }
 
 export default async (req, context) => {
@@ -69,24 +51,21 @@ export default async (req, context) => {
           continue;
         }
       }
-      if (assetId === "mstr") {
-        toFetch[assetId] = "MIGA.F";
-      } else if (assetId in ETF_TICKERS) {
-        toFetch[assetId] = ETF_TICKERS[assetId];
+      if (assetId in STOOQ_TICKERS) {
+        toFetch[assetId] = STOOQ_TICKERS[assetId];
       }
     }
 
-    const promises = Object.entries(toFetch).map(async ([assetId, ticker]) => {
-      let price = await fetchYahooPrice(ticker);
-      if (!price) price = await fetchGoogleFinancePrice(ticker);
+    await Promise.all(Object.entries(toFetch).map(async ([assetId, ticker]) => {
+      const price = await fetchStooqPrice(ticker);
       if (price) {
         prices[assetId] = price;
         PRICE_CACHE[assetId] = [now, price];
         console.log(`✓ ${assetId}: ${price}`);
+      } else {
+        console.log(`✗ ${assetId}: no price found`);
       }
-    });
-
-    await Promise.all(promises);
+    }));
 
     return new Response(JSON.stringify(prices), {
       status: 200,
