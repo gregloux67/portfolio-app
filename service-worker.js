@@ -31,7 +31,10 @@ self.addEventListener("fetch", e => {
       fetch(e.request)
         .then(res => {
           const clone = res.clone();
-          caches.open(CACHE_API).then(c => c.put(e.request, clone));
+          // Only cache GET requests
+          if (e.request.method === "GET") {
+            caches.open(CACHE_API).then(c => c.put(e.request, clone));
+          }
           return res;
         })
         .catch(() => caches.match(e.request) || new Response("No network"))
