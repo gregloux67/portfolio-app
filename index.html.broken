@@ -27,14 +27,6 @@ input, select, button, textarea { font-family: inherit; }
 
 const { useState, useEffect, useCallback, useMemo } = React;
 
-// API Base URL - supports localhost, Netlify Functions, or Render proxy
-const API_ENDPOINT = (endpoint) => {
-  if (window.location.hostname === 'localhost') {
-    return `http://localhost:8001/api/${endpoint}`;
-  }
-  return `/.netlify/functions/${endpoint}`;
-};
-
 // ── CONSTANTES ──────────────────────────────────────────────────────────────
 const ASSETS_DEFAULT = [
   { id:"pust",  name:"PUST",  fullName:"Nasdaq-100",        ticker:"PUST.PA",  currency:"EUR", poche:"PEA", target:15, color:"#2563EB" },
@@ -113,7 +105,7 @@ async function fetchMnavCalcAuto(mstrPriceEur, btcPriceEur) {
   if (!mstrPriceEur || !btcPriceEur) return null;
   try {
     // Get EUR to USD conversion via proxy (no CORS issues)
-    const fx = await fetch(API_ENDPOINT('fx'), {method: "POST", signal: AbortSignal.timeout(5000)});
+    const fx = await fetch("/api/fx", {method: "POST", signal: AbortSignal.timeout(5000)});
     const fxd = await fx.json();
     const eurUsd = fxd?.eur_usd || 1.08;
 
@@ -128,7 +120,7 @@ async function fetchMnavCalcAuto(mstrPriceEur, btcPriceEur) {
     const prefUsd = 15479e6; // $15,479M
     const cashUsd = 2250e6; // $2,250M USD Reserve
 
-    const r = await fetch(API_ENDPOINT('mnav-calc'), {
+    const r = await fetch("/api/mnav-calc", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
@@ -160,7 +152,7 @@ async function fetchMnavCalcAuto(mstrPriceEur, btcPriceEur) {
 
 async function fetchMnavStrategy() {
   try {
-    const r = await fetch(API_ENDPOINT('mnav'), {
+    const r = await fetch("/api/mnav", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({})
@@ -902,7 +894,7 @@ function App() {
         urnu: "URNU.MI",
         vvmx: "VVMX.DE"
       };
-      const r = await fetch(API_ENDPOINT('prices'), {
+      const r = await fetch("/api/prices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tickers: tickersMap })
@@ -924,7 +916,7 @@ function App() {
     const mstrPrice = newPrices["mstr"];
     const btcPrice = newPrices["btc"];
     if (mstrPrice || btcPrice) refreshMnav(mstrPrice, btcPrice);
-  },[assets, refreshMnav]);
+  },[assets, apiKey, refreshMnav]);
 
   // Chargement automatique au démarrage
   useEffect(() => {

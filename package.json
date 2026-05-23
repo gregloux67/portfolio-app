@@ -1,0 +1,8 @@
+{
+  "name": "portfolio-app",
+  "version": "1.0.0",
+  "description": "Portfolio management PWA",
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}
