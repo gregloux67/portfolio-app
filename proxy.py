@@ -103,13 +103,21 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             return None
 
     def fetch_yahoo_price(self, ticker):
-        """Fetch price from Yahoo Finance"""
+        """Fetch price directly from Yahoo Finance API"""
         try:
-            if not HAS_YFINANCE:
-                return None
-            data = yf.Ticker(ticker)
-            price = data.info.get('currentPrice') or data.info.get('regularMarketPrice')
-            return price
+            url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=price"
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                result = data.get('quoteSummary', {}).get('result', [{}])[0]
+                price = result.get('price', {}).get('regularMarketPrice', {}).get('raw')
+                if price:
+                    return price
+                # Fallback to currentPrice
+                price = result.get('price', {}).get('currentPrice', {}).get('raw')
+                return price
         except Exception as e:
             print(f"Error fetching Yahoo price for {ticker}: {e}", file=sys.stderr)
             return None
