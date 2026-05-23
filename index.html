@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Portefeuille">
+<meta name="theme-color" content="#1A1A2E">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>Portefeuille</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+body { background: #F0F2F5; font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; color: #111827; }
+input, select, button, textarea { font-family: inherit; }
+::-webkit-scrollbar { width: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>if('serviceWorker'in navigator){navigator.serviceWorker.register('/service-worker.js');}</script>
+<script type="text/babel">
+
+const { useState, useEffect, useCallback, useMemo } = React;
+
+// API Base URL - Change this after deploying proxy to Railway
+const API_BASE = window.location.hostname === 'localhost'
+  ? 'http://localhost:8001'
+  : 'https://portfolio-app-th0y.onrender.com';
+
+// ── CONSTANTES ──────────────────────────────────────────────────────────────
+const ASSETS_DEFAULT = [
+  { id:"pust",  name:"PUST",  fullName:"Nasdaq-100",        ticker:"PUST.PA",  currency:"EUR", poche:"PEA", target:15, color:"#2563EB" },
+  { id:"paeem", name:"PAEEM", fullName:"MSCI Emerging",     ticker:"PAEEM.PA", currency:"EUR", poche:"PEA", target:10, color:"#3B82F6" },
+  { id:"mstr",  name:"MSTR",  fullName:"MicroStrategy",     ticker:"MSTR",     currency:"USD", poche:"CTO", target:50, color:"#D97706" },
+  { id:"urnu",  name:"URNU",  fullName:"Uranium/Nucléaire", ticker:"URNU.DE",  currency:"USD", poche:"CTO", target:15, color:"#DC2626" },
+  { id:"vvmx",  name:"VVMX",  fullName:"Métaux Critiques",  ticker:"VVMX.DE",  currency:"USD", poche:"CTO", target:10, color:"#7C3AED" },
+  { id:"btc",   name:"BTC",   fullName:"Bitcoin (Ledger)",  ticker:"BTC-EUR",  currency:"EUR", poche:"BTC", target:0,  color:"#EA580C" },
+];
+const POCHES = ["PEA","CTO","BTC"];
+const POCHE_COLORS = { PEA:"#2563EB", CTO:"#D97706", BTC:"#EA580C" };
+const HALVING_DATE = new Date("2024-04-19");
+
+// ── STORAGE ─────────────────────────────────────────────────────────────────
+const load = (k,d) => { try { const v=localStorage.getItem(k); return v?JSON.parse(v):d; } catch { return d; } };
+const save = (k,v) => { try { localStorage.setItem(k,JSON.stringify(v)); } catch {} };
+
+// ── APIs ─────────────────────────────────────────────────────────────────────
+// URLs TradingView par actif — source fiable en EUR
+const TRADINGVIEW_URLS = {
+  pust:  "https://fr.tradingview.com/symbols/EURONEXT-PUST/",
+  paeem: "https://fr.tradingview.com/symbols/EURONEXT-PAEEM/",
+  mstr:  "https://fr.tradingview.com/symbols/XETR-MIGA/",
+  urnu:  "https://fr.tradingview.com/symbols/EURONEXT-URNU/",
+  vvmx:  "https://fr.tradingview.com/symbols/XETR-VVMX/",
+};
+
+// Tickers Yahoo Finance corrects
+const YAHOO_TICKERS = {
+  pust:  "PUST.PA",
+  paeem: "PAEEM.PA",
+  mstr:  "MIGA.F",   // Strategy sur Francfort en EUR
+  urnu:  "URNU.PA",
+  vvmx:  "VVMX.DE",
+  btc:   null,       // CoinGecko
+};
+
+async function fetchBtcPrice() {
+  try {
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=eur", {signal:AbortSignal.timeout(6000)});
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d?.bitcoin?.eur || null;
+  } catch { return null; }
+}
+
+async function fetchPriceFree(asset) {
+  if (asset.id === "btc") return fetchBtcPrice();
+  return null; // Yahoo Finance bloqué par CORS — utiliser Claude API
+}
+
+const STRATEGY_BTC_HOLDINGS = 568840; // BTC détenus — mettre à jour manuellement
+const STRATEGY_SHARES = 351900000;    // Actions en circulation (mai 2026)
+const STRATEGY_DEBT_USD = 8254e6;     // Dette (~8,25Md$)
+const STRATEGY_PREF_USD = 15479e6;    // Preferred Stock (~15,48Md$)
+
+async function fetchMnavCalc(mstrPriceEur, btcPriceEur) {
+  if (!mstrPriceEur || !btcPriceEur) return null;
+  try {
+    const fx = await fetch("https://api.frankfurter.app/latest?from=EUR&to=USD",{signal:AbortSignal.timeout(5000)});
+    const fxd = await fx.json();
+    const eurUsd = fxd?.rates?.USD || 1.08;
+    const mstrUsd = mstrPriceEur * eurUsd;
+    const btcUsd = btcPriceEur * eurUsd;
+    // Enterprise Value = Market Cap + Debt + Preferred Stock
+    const marketCap = mstrUsd * STRATEGY_SHARES;
+    const ev = marketCap + STRATEGY_DEBT_USD + STRATEGY_PREF_USD;
+    // Bitcoin NAV = BTC holdings × BTC price
+    const btcNav = STRATEGY_BTC_HOLDINGS * btcUsd;
+    const mnav = ev / btcNav;
+    return (mnav > 0.5 && mnav < 10) ? Math.round(mnav * 100) / 100 : null;
+  } catch { return null; }
+}
+
+async function fetchMnavCalcAuto(mstrPriceEur, btcPriceEur) {
+  if (!mstrPriceEur || !btcPriceEur) return null;
+  try {
+    // Get EUR to USD conversion via proxy (no CORS issues)
+    const fx = await fetch(`${API_BASE}/api/fx`, {method: "POST", signal: AbortSignal.timeout(5000)});
+    const fxd = await fx.json();
+    const eurUsd = fxd?.eur_usd || 1.08;
+
+    const mstrPriceUsd = mstrPriceEur * eurUsd;
+    const btcPriceUsd = btcPriceEur * eurUsd;
+
+    // Current Strategy data (from latest filing/strategy.com)
+    // These are relatively stable, update when you have latest data
+    const btcHoldings = 843738;
+    const marketCapUsd = (mstrPriceUsd * 351900000); // Market Cap = Price × Shares
+    const debtUsd = 8254e6; // $8,254M
+    const prefUsd = 15479e6; // $15,479M
+    const cashUsd = 2250e6; // $2,250M USD Reserve
+
+    const r = await fetch(`${API_BASE}/api/mnav-calc`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        mstr_price_usd: mstrPriceUsd,
+        btc_price_usd: btcPriceUsd,
+        btc_holdings: btcHoldings,
+        market_cap_usd: marketCapUsd,
+        debt_usd: debtUsd,
+        pref_usd: prefUsd,
+        cash_usd: cashUsd
+      })
+    });
+
+    if (!r.ok) return null;
+    const d = await r.json();
+    const v = d.mnav;
+    console.log("fetchMnavCalcAuto result:", {mstrPriceEur, btcPriceEur, marketCapUsd, mnav: v});
+    if (v && v >= 1.0 && v <= 4.0) {
+      console.log("✓ Returning mNAV:", v);
+      return v;
+    }
+    console.log("✗ Invalid mNAV:", v);
+    return null;
+  } catch (e) {
+    console.error("fetchMnavCalcAuto error:", e);
+    return null;
+  }
+}
+
+async function fetchMnavStrategy() {
+  try {
+    const r = await fetch(`${API_BASE}/api/mnav`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({})
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const v = d.mnav;
+    return (v && v >= 1.0 && v <= 4.0) ? v : null;
+  } catch { return null; }
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+const fmt = (n,dec=0) => typeof n==="number" ? n.toLocaleString("fr-FR",{minimumFractionDigits:dec,maximumFractionDigits:dec}) : "—";
+const card = {background:"#fff",borderRadius:12,border:"1px solid #E5E7EB",marginBottom:10,overflow:"hidden"};
+const lbl = {fontSize:10,letterSpacing:3,color:"#9CA3AF",textTransform:"uppercase",marginBottom:8};
+const btnBase = {border:"none",borderRadius:8,padding:"9px 14px",fontSize:12,fontWeight:600,cursor:"pointer"};
+
+// ── ONGLET ACCUEIL ─────────────────────────────────────────────────────────
+function TabAccueil({ assets, prices, loading, mnav, mnavLoading, onRefreshAll, onRefreshMnav }) {
+  const getPrice = a => prices[a.id] || a.priceManual || 0;
+  const totalValue = assets.reduce((s,a)=>s+(a.parts*getPrice(a)),0);
+  const totalPRU = assets.reduce((s,a)=>s+(a.parts*(a.pru||0)),0);
+  const totalPnl = totalPRU>0 ? totalValue-totalPRU : null;
+
+  const mnavSignal = mnav ? (mnav<1.3
+    ? {label:"100% MSTR",color:"#16A34A",bg:"#F0FDF4",border:"#BBF7D0",desc:"Ordre limite TR · 15h30-17h30"}
+    : {label:"100% BTC",color:"#DC2626",bg:"#FFF1F2",border:"#FECDD3",desc:"OKX ordre limite → Ledger"}) : null;
+
+  const now = new Date();
+  const moisEcoules = Math.floor((now-HALVING_DATE)/(1000*60*60*24*30.5));
+  const pct = Math.min(100,Math.round(moisEcoules/48*100));
+  const phases = [{max:6,label:"Accumulation",color:"#2563EB"},{max:18,label:"Hausse",color:"#16A34A"},{max:24,label:"Parabolique",color:"#D97706"},{max:36,label:"Baisse",color:"#DC2626"},{max:48,label:"Creux",color:"#7C3AED"}];
+  const currentPhase = phases.find(p=>moisEcoules<p.max) || phases[phases.length-1];
+
+  return (
+    <div>
+      {/* Valeur totale */}
+      <div style={{background:"#1A1A2E",borderRadius:14,padding:"18px 16px",marginBottom:10,color:"white"}}>
+        <div style={{fontSize:10,color:"rgba(255,255,255,0.4)",letterSpacing:3,textTransform:"uppercase",marginBottom:6}}>Valeur totale du portefeuille</div>
+        <div style={{fontSize:36,fontWeight:800,letterSpacing:-1}}>{fmt(totalValue)} <span style={{fontSize:18,opacity:0.4}}>€</span></div>
+        {totalPnl!==null && (
+          <div style={{fontSize:13,color:totalPnl>=0?"#4ADE80":"#F87171",fontWeight:600,marginTop:4}}>
+            {totalPnl>=0?"+":""}{fmt(totalPnl)} € ({totalPnl>=0?"+":""}{fmt((totalPnl/totalPRU)*100,1)}%) depuis PRU
+          </div>
+        )}
+        <div style={{display:"flex",gap:6,marginTop:12,flexWrap:"wrap"}}>
+          {POCHES.map(p=>{
+            const val=assets.filter(a=>a.poche===p).reduce((s,a)=>s+(a.parts*getPrice(a)),0);
+            const pct=totalValue>0?((val/totalValue)*100).toFixed(1):"0";
+            return(
+              <div key={p} style={{background:"rgba(255,255,255,0.07)",borderRadius:8,padding:"8px 10px",flex:1,minWidth:70}}>
+                <div style={{fontSize:9,color:"rgba(255,255,255,0.4)",marginBottom:2}}>{p}</div>
+                <div style={{fontSize:13,fontWeight:700,color:POCHE_COLORS[p]}}>{fmt(val)} €</div>
+                <div style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{pct}%</div>
+              </div>
+            );
+          })}
+        </div>
+        {/* Barre allocation réelle */}
+        {totalValue>0&&(
+          <div style={{marginTop:12}}>
+            <div style={{display:"flex",height:5,borderRadius:3,overflow:"hidden",gap:1,marginBottom:6}}>
+              {assets.filter(a=>a.parts>0).map(a=>{
+                const v=a.parts*getPrice(a);
+                const p=totalValue>0?(v/totalValue*100):0;
+                return p>0?<div key={a.id} style={{flex:p,background:a.color}}/>:null;
+              })}
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {assets.filter(a=>a.parts>0).map(a=>{
+                const v=a.parts*getPrice(a);
+                const p=totalValue>0?((v/totalValue)*100).toFixed(0):"0";
+                const drift=a.target>0?parseFloat(p)-a.target:null;
+                return(
+                  <div key={a.id} style={{display:"flex",alignItems:"center",gap:3,fontSize:10,color:"rgba(255,255,255,0.45)"}}>
+                    <div style={{width:6,height:6,background:a.color,borderRadius:1}}/>
+                    {p}% {a.name}
+                    {drift!==null&&Math.abs(drift)>5&&<span style={{color:"#F87171"}}>({drift>0?"+":""}{drift.toFixed(0)}%)</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* mNAV */}
+      <div style={{...card,padding:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={lbl}>Signal mNAV</div>
+          <div style={{display:"flex",gap:6}}>
+            <a href="https://www.strategy.com/bitcoin" target="_blank" rel="noopener noreferrer"
+              style={{background:"#F9FAFB",color:"#6B7280",border:"1px solid #E5E7EB",borderRadius:6,padding:"4px 8px",fontSize:11,textDecoration:"none"}}>
+              strategy.com
+            </a>
+            <button onClick={()=>onRefreshMnav(null,null)} disabled={mnavLoading}
+              style={{...btnBase,background:"#EFF6FF",color:"#1D4ED8",padding:"4px 10px",fontSize:11}}>
+              {mnavLoading?"...":"Actualiser"}
+            </button>
+          </div>
+        </div>
+        {mnav ? (
+          <div style={{background:mnavSignal.bg,border:`1px solid ${mnavSignal.border}`,borderRadius:10,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontSize:28,fontWeight:800,color:mnavSignal.color}}>{mnav.toFixed(2)}<span style={{fontSize:13,color:mnavSignal.color,opacity:0.7}}>×</span></div>
+              <div style={{fontSize:13,fontWeight:700,color:mnavSignal.color}}>{mnavSignal.label}</div>
+              <div style={{fontSize:11,color:"#6B7280",marginTop:2}}>{mnavSignal.desc}</div>
+            </div>
+            <div style={{fontSize:10,color:"#9CA3AF",textAlign:"right",maxWidth:80}}>
+              {mnav<1.3?"Prime\nacceptable":"Prime\nexcessive"}
+            </div>
+          </div>
+        ) : (
+          <div style={{background:"#F9FAFB",borderRadius:8,padding:"10px 12px",fontSize:12,color:"#9CA3AF",textAlign:"center"}}>
+            Appuyer sur Actualiser ou saisir la mNAV manuellement dans l'onglet Investir
+          </div>
+        )}
+      </div>
+
+      {/* Cycle BTC */}
+      <div style={{...card,padding:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div style={lbl}>Cycle BTC — Halving avr. 2024</div>
+          <div style={{fontSize:12,color:"#9CA3AF"}}>Mois {moisEcoules}/48</div>
+        </div>
+        <div style={{fontSize:14,fontWeight:700,color:currentPhase.color,marginBottom:8}}>{currentPhase.label}</div>
+        <div style={{position:"relative",height:8,background:"#F3F4F6",borderRadius:4,overflow:"hidden",marginBottom:6}}>
+          {[{p:12,c:"#2563EB"},{p:37,c:"#16A34A"},{p:50,c:"#D97706"},{p:75,c:"#DC2626"},{p:100,c:"#7C3AED"}].map((seg,i,arr)=>(
+            <div key={i} style={{position:"absolute",left:`${i===0?0:arr[i-1].p}%`,width:`${seg.p-(i===0?0:arr[i-1].p)}%`,height:"100%",background:seg.c,opacity:0.3}}/>
+          ))}
+          <div style={{position:"absolute",left:`${pct}%`,top:0,width:3,height:"100%",background:currentPhase.color,transform:"translateX(-50%)",borderRadius:2}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#9CA3AF"}}>
+          <span>Avr. 2024</span><span>Sommet ~oct. 2025</span><span>Creux ~2026</span><span>Avr. 2028</span>
+        </div>
+      </div>
+
+      {/* Bouton actualiser */}
+      <button onClick={onRefreshAll} disabled={loading}
+        style={{...btnBase,width:"100%",background:"#1A1A2E",color:"white",fontSize:13,padding:"12px"}}>
+        {loading?"Chargement des prix...":"Actualiser tous les prix"}
+      </button>
+    </div>
+  );
+}
+
+// ── ONGLET INVESTIR ────────────────────────────────────────────────────────
+function TabInvestir({ mnav }) {
+  const [amount, setAmount] = useState(()=>load("invest_amount",1250));
+  const [mnavInput, setMnavInput] = useState(()=>load("invest_mnav",""));
+  useEffect(()=>{ save("invest_amount",amount); },[amount]);
+  useEffect(()=>{ save("invest_mnav",mnavInput); },[mnavInput]);
+  useEffect(()=>{ if(mnav&&!mnavInput) setMnavInput(mnav.toFixed(2)); },[mnav]);
+
+  const mnavVal = parseFloat(mnavInput);
+  const isMstrZone = !isNaN(mnavVal) && mnavVal < 1.3;
+  const hasSignal = !isNaN(mnavVal) && mnavVal > 0;
+
+  const lines = [
+    { name:"PUST — Nasdaq-100",  pct:15, color:"#2563EB", where:"Fortuneo PEA",  how:"Ordre mensuel", mode:"parts" },
+    { name:"PAEEM — Emerging",   pct:10, color:"#3B82F6", where:"Fortuneo PEA",  how:"Ordre mensuel", mode:"parts" },
+    { name:isMstrZone?"MSTR":"BTC — Ledger", pct:50, color:isMstrZone?"#D97706":"#EA580C", where:isMstrZone?"Trade Republic":"OKX → Ledger", how:isMstrZone?"Ordre limite 15h30-17h30":"Ordre limite maker", mode:"parts" },
+    { name:"URNU — Uranium",     pct:15, color:"#DC2626", where:"Trade Republic", how:"Plan auto — gratuit", mode:"auto" },
+    { name:"VVMX — Métaux",      pct:10, color:"#7C3AED", where:"Trade Republic", how:"Plan auto — gratuit", mode:"auto" },
+  ];
+  const total = lines.reduce((s,l)=>s+Math.round(l.pct/100*amount),0);
+  const diff = amount - total;
+
+  return (
+    <div>
+      {/* Capital + mNAV */}
+      <div style={{...card,padding:14}}>
+        <div style={lbl}>Paramètres du mois</div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          <div style={{flex:1,minWidth:130}}>
+            <div style={{fontSize:11,color:"#6B7280",marginBottom:5}}>Capital disponible (€)</div>
+            <input type="number" min={0} step={50} value={amount} onChange={e=>setAmount(Number(e.target.value))}
+              style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"1px solid #D1D5DB",fontSize:22,fontWeight:800,color:"#111827",outline:"none"}}/>
+          </div>
+          <div style={{flex:1,minWidth:130}}>
+            <div style={{fontSize:11,color:"#6B7280",marginBottom:5}}>mNAV actuelle</div>
+            <input type="number" step="0.01" value={mnavInput} onChange={e=>setMnavInput(e.target.value)} placeholder="ex: 1.22"
+              style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`2px solid ${hasSignal?(isMstrZone?"#BBF7D0":"#FECDD3"):"#E5E7EB"}`,fontSize:22,fontWeight:800,color:hasSignal?(isMstrZone?"#16A34A":"#DC2626"):"#111827",outline:"none"}}/>
+            {hasSignal&&<div style={{fontSize:10,color:isMstrZone?"#16A34A":"#DC2626",marginTop:4,fontWeight:600}}>{isMstrZone?"Acheter MSTR":"Acheter BTC"}</div>}
+          </div>
+        </div>
+      </div>
+
+      {/* Répartition */}
+      <div style={{...card,padding:14}}>
+        <div style={lbl}>Répartition exacte</div>
+        {lines.map((line,i)=>{
+          const euros = Math.round(line.pct/100*amount);
+          return(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderTop:i>0?"1px solid #F3F4F6":"none"}}>
+              <div style={{width:3,height:44,background:line.color,borderRadius:2,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:600,color:"#111827"}}>{line.name}</div>
+                <div style={{fontSize:11,color:"#9CA3AF"}}>{line.where}</div>
+                <div style={{fontSize:10,color:line.mode==="auto"?"#16A34A":"#9CA3AF"}}>{line.how}</div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontSize:22,fontWeight:800,color:line.color}}>{euros}<span style={{fontSize:12,color:"#9CA3AF"}}>€</span></div>
+                <div style={{fontSize:10,color:"#9CA3AF"}}>{line.pct}% du capital</div>
+              </div>
+            </div>
+          );
+        })}
+        <div style={{borderTop:"2px solid #F3F4F6",paddingTop:10,marginTop:4,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:12,color:"#6B7280"}}>
+            Total {diff!==0&&<span style={{color:"#9CA3AF",fontSize:11}}>+{diff}€ en cash TR</span>}
+          </div>
+          <div style={{fontSize:22,fontWeight:800,color:"#111827"}}>{amount}<span style={{fontSize:13,color:"#9CA3AF"}}>€</span></div>
+        </div>
+      </div>
+
+      {/* Rappel */}
+      {hasSignal&&(
+        <div style={{background:isMstrZone?"#F0FDF4":"#FFF1F2",border:`1px solid ${isMstrZone?"#BBF7D0":"#FECDD3"}`,borderRadius:10,padding:"12px 14px",marginBottom:10,fontSize:12,color:isMstrZone?"#166534":"#991B1B"}}>
+          {isMstrZone
+            ?"mNAV < 1,3 — Accumuler cash TR, déployer sur MSTR dès que la fenêtre s'ouvre (15h30-17h30)"
+            :"mNAV > 1,3 — Si toujours > 1,3 en fin de mois, acheter BTC via OKX et retrait immédiat Ledger"}
+        </div>
+      )}
+      <div style={{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:10,padding:"12px 14px",fontSize:12,color:"#92400E"}}>
+        Tir ciblé : virer depuis compte bancaire si mNAV &lt; 1,1 ou crash violent
+      </div>
+    </div>
+  );
+}
+
+// ── ONGLET TRACKER ─────────────────────────────────────────────────────────
+function TabTracker({ assets, setAssets, prices }) {
+  const [editId, setEditId] = useState(null);
+  const [buyId, setBuyId] = useState(null);
+  const [sellId, setSellId] = useState(null);
+  const [buyMode, setBuyMode] = useState("eur"); // "eur" ou "parts"
+  const [buyVal, setBuyVal] = useState("");
+  const [buyPrice, setBuyPrice] = useState("");
+  const [sellVal, setSellVal] = useState("");
+  const [sellMode, setSellMode] = useState("parts");
+  const [addMode, setAddMode] = useState(false);
+  const [newA, setNewA] = useState({name:"",ticker:"",currency:"EUR",poche:"CTO",target:0,color:"#6B7280"});
+
+  const getPrice = a => prices[a.id] || a.priceManual || 0;
+  const totalValue = assets.reduce((s,a)=>s+(a.parts*getPrice(a)),0);
+
+  const executeBuy = (a) => {
+    const price = parseFloat(buyPrice) || getPrice(a);
+    if (!price || price<=0) return;
+    let parts;
+    if (buyMode==="eur") {
+      const euros = parseFloat(buyVal);
+      if (!euros || euros<=0) return;
+      parts = euros / price;
+    } else {
+      parts = parseFloat(buyVal);
+      if (!parts || parts<=0) return;
+    }
+    const newParts = a.parts + parts;
+    const newPru = ((a.parts*(a.pru||0)) + parts*price) / newParts;
+    setAssets(prev=>prev.map(x=>x.id===a.id?{...x,parts:Math.round(newParts*10000)/10000,pru:Math.round(newPru*100)/100}:x));
+    setBuyId(null); setBuyVal(""); setBuyPrice("");
+  };
+
+  const executeSell = (a) => {
+    const price = getPrice(a);
+    let parts;
+    if (sellMode==="eur") {
+      const euros = parseFloat(sellVal);
+      if (!euros || euros<=0 || !price) return;
+      parts = euros / price;
+    } else {
+      parts = parseFloat(sellVal);
+    }
+    if (!parts || parts<=0 || parts>a.parts) return;
+    const newParts = Math.max(0, a.parts - parts);
+    setAssets(prev=>prev.map(x=>x.id===a.id?{...x,parts:Math.round(newParts*10000)/10000}:x));
+    setSellId(null); setSellVal("");
+  };
+
+  const exportJSON = () => {
+    const blob = new Blob([JSON.stringify({assets,exportDate:new Date().toISOString()},null,2)],{type:"application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href=url; a.download=`portefeuille-${new Date().toISOString().split("T")[0]}.json`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  const importJSON = (e) => {
+    const file=e.target.files[0]; if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{ try { const d=JSON.parse(ev.target.result); if(d.assets){setAssets(d.assets);} } catch{alert("Fichier invalide");} };
+    reader.readAsText(file);
+  };
+
+  const modeBtn = (active, label, onClick) => (
+    <button onClick={onClick} style={{flex:1,background:active?"#1A1A2E":"#F9FAFB",color:active?"white":"#6B7280",border:`1px solid ${active?"#1A1A2E":"#E5E7EB"}`,borderRadius:6,padding:"5px",fontSize:11,fontWeight:active?600:400,cursor:"pointer"}}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div>
+      {/* Actions export/import */}
+      <div style={{display:"flex",gap:6,marginBottom:10}}>
+        <button onClick={exportJSON} style={{...btnBase,background:"#F0FDF4",color:"#16A34A",border:"1px solid #BBF7D0",flex:1}}>
+          Export JSON
+        </button>
+        <label style={{...btnBase,background:"#EFF6FF",color:"#1D4ED8",border:"1px solid #BFDBFE",flex:1,textAlign:"center",cursor:"pointer"}}>
+          Import JSON<input type="file" accept=".json" onChange={importJSON} style={{display:"none"}}/>
+        </label>
+      </div>
+
+      {/* Total */}
+      <div style={{background:"#1A1A2E",borderRadius:12,padding:"14px 16px",marginBottom:10,color:"white"}}>
+        <div style={{fontSize:9,color:"rgba(255,255,255,0.4)",letterSpacing:3,textTransform:"uppercase",marginBottom:4}}>Valeur totale</div>
+        <div style={{fontSize:30,fontWeight:800}}>{fmt(totalValue)} <span style={{fontSize:14,opacity:0.4}}>€</span></div>
+        <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
+          {POCHES.map(p=>{
+            const val=assets.filter(a=>a.poche===p).reduce((s,a)=>s+(a.parts*getPrice(a)),0);
+            return(
+              <div key={p} style={{background:"rgba(255,255,255,0.07)",borderRadius:6,padding:"6px 10px",flex:1,minWidth:60}}>
+                <div style={{fontSize:9,color:"rgba(255,255,255,0.4)"}}>{p}</div>
+                <div style={{fontSize:12,fontWeight:700,color:POCHE_COLORS[p]}}>{fmt(val)} €</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Actifs */}
+      {POCHES.map(poche=>{
+        const pocheAssets=assets.filter(a=>a.poche===poche);
+        if(!pocheAssets.length) return null;
+        const pocheVal=pocheAssets.reduce((s,a)=>s+(a.parts*getPrice(a)),0);
+        return(
+          <div key={poche} style={{marginBottom:14}}>
+            <div style={{fontSize:10,fontWeight:700,color:POCHE_COLORS[poche],letterSpacing:2,textTransform:"uppercase",marginBottom:6,display:"flex",justifyContent:"space-between",paddingLeft:2}}>
+              <span>{poche}</span><span style={{color:"#9CA3AF",fontWeight:400}}>{fmt(pocheVal)} €</span>
+            </div>
+            {pocheAssets.map(a=>{
+              const price=getPrice(a);
+              const value=a.parts*price;
+              const plu=(a.pru>0&&price>0)?(price-a.pru)*a.parts:null;
+              const pluPct=(a.pru>0&&price>0)?((price-a.pru)/a.pru*100):null;
+              const realPct=totalValue>0?(value/totalValue*100):0;
+              const drift=a.target>0?realPct-a.target:null;
+              const isBuy=buyId===a.id, isSell=sellId===a.id, isEdit=editId===a.id;
+
+              // Calculs preview achat
+              const buyPriceVal=parseFloat(buyPrice)||price;
+              const buyParts=buyMode==="eur"?(parseFloat(buyVal)||0)/buyPriceVal:(parseFloat(buyVal)||0);
+              const newPRU=buyParts>0?((a.parts*(a.pru||0)+buyParts*buyPriceVal)/(a.parts+buyParts)):0;
+
+              return(
+                <div key={a.id} style={{...card,borderLeft:`3px solid ${a.color}`,marginBottom:8}}>
+                  <div style={{padding:"12px 14px"}}>
+                    {/* En-tête */}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                      <div>
+                        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                          <div style={{width:8,height:8,background:a.color,borderRadius:2}}/>
+                          <span style={{fontSize:14,fontWeight:700}}>{a.name}</span>
+                          <span style={{fontSize:11,color:"#9CA3AF"}}>{a.fullName}</span>
+                        </div>
+                        <div style={{fontSize:11,color:"#9CA3AF"}}>{a.ticker} · {prices[a.id]?"prix auto":"prix manuel"}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontSize:18,fontWeight:800,color:a.color}}>{fmt(value)} €</div>
+                        {drift!==null&&(
+                          <div style={{fontSize:10,color:Math.abs(drift)>5?"#DC2626":"#16A34A",fontWeight:600}}>
+                            {realPct.toFixed(1)}% / cible {a.target}% {Math.abs(drift)>5?"(ecart)":""}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Stats grid */}
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginBottom:10}}>
+                      {[
+                        ["Parts", a.parts > 0 ? fmt(a.parts,4).replace(/,?0+$/,"") : "0"],
+                        ["Prix", price>0?`${fmt(price,2)} €`:"—"],
+                        ["PRU", a.pru>0?`${fmt(a.pru,2)} €`:"—"],
+                        plu!==null?["P/L", `${plu>=0?"+":""}${fmt(plu)} €`]:["Alloc.",`${realPct.toFixed(1)}%`],
+                      ].map(([k,v],i)=>(
+                        <div key={i} style={{background:"#F9FAFB",borderRadius:6,padding:"6px 8px"}}>
+                          <div style={{fontSize:9,color:"#9CA3AF",letterSpacing:1,textTransform:"uppercase"}}>{k}</div>
+                          <div style={{fontSize:12,fontWeight:600,color:k==="P/L"?(plu>=0?"#16A34A":"#DC2626"):"#374151",marginTop:1}}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Boutons */}
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{setBuyId(isBuy?null:a.id);setSellId(null);setEditId(null);setBuyVal("");setBuyPrice(price>0?String(Math.round(price*100)/100):"");}}
+                        style={{flex:1,background:isBuy?"#F0FDF4":"#F9FAFB",color:isBuy?"#16A34A":"#374151",border:`1px solid ${isBuy?"#BBF7D0":"#E5E7EB"}`,borderRadius:6,padding:"7px",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+                        Acheter
+                      </button>
+                      <button onClick={()=>{setSellId(isSell?null:a.id);setBuyId(null);setEditId(null);setSellVal("");}}
+                        style={{flex:1,background:isSell?"#FFF1F2":"#F9FAFB",color:isSell?"#DC2626":"#374151",border:`1px solid ${isSell?"#FECDD3":"#E5E7EB"}`,borderRadius:6,padding:"7px",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+                        Vendre
+                      </button>
+                      <button onClick={()=>{setEditId(isEdit?null:a.id);setBuyId(null);setSellId(null);}}
+                        style={{background:isEdit?"#EFF6FF":"#F9FAFB",color:isEdit?"#1D4ED8":"#9CA3AF",border:`1px solid ${isEdit?"#BFDBFE":"#E5E7EB"}`,borderRadius:6,padding:"7px 10px",fontSize:12,cursor:"pointer"}}>
+                        Editer
+                      </button>
+                    </div>
+
+                    {/* Panel Acheter */}
+                    {isBuy&&(
+                      <div style={{borderTop:"1px solid #F0FDF4",marginTop:10,paddingTop:10}}>
+                        <div style={{display:"flex",gap:4,marginBottom:10}}>
+                          {modeBtn(buyMode==="eur","En euros",()=>setBuyMode("eur"))}
+                          {modeBtn(buyMode==="parts","En parts",()=>setBuyMode("parts"))}
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                          <div>
+                            <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>{buyMode==="eur"?"Montant investi (€)":"Nombre de parts"}</div>
+                            <input type="number" step="any" min="0" value={buyVal} onChange={e=>setBuyVal(e.target.value)}
+                              placeholder={buyMode==="eur"?"ex: 187":"ex: 7"}
+                              style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",fontSize:14,fontWeight:600,outline:"none"}}/>
+                          </div>
+                          <div>
+                            <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>Prix d'achat (€/part)</div>
+                            <input type="number" step="any" min="0" value={buyPrice} onChange={e=>setBuyPrice(e.target.value)}
+                              placeholder={price>0?String(Math.round(price*100)/100):"prix"}
+                              style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",fontSize:14,fontWeight:600,outline:"none"}}/>
+                          </div>
+                        </div>
+                        {buyVal&&buyParts>0&&(
+                          <div style={{background:"#F0FDF4",borderRadius:8,padding:"8px 10px",marginBottom:8,fontSize:11,color:"#166534"}}>
+                            {buyMode==="eur"?`Nombre de parts : ${Math.round(buyParts*1000)/1000}`:`Cout total : ${fmt(buyParts*buyPriceVal,0)} €`}
+                            {" · "}Nouveau PRU : {fmt(newPRU,2)} €
+                            {" · "}Parts totales : {Math.round((a.parts+buyParts)*1000)/1000}
+                          </div>
+                        )}
+                        <button onClick={()=>executeBuy(a)}
+                          style={{...btnBase,width:"100%",background:"#16A34A",color:"white",fontSize:13,padding:"9px"}}>
+                          Confirmer l'achat
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Panel Vendre */}
+                    {isSell&&(
+                      <div style={{borderTop:"1px solid #FFF1F2",marginTop:10,paddingTop:10}}>
+                        <div style={{display:"flex",gap:4,marginBottom:10}}>
+                          {modeBtn(sellMode==="eur","En euros",()=>setSellMode("eur"))}
+                          {modeBtn(sellMode==="parts","En parts",()=>setSellMode("parts"))}
+                        </div>
+                        <div style={{marginBottom:8}}>
+                          <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>
+                            {sellMode==="eur"?`Montant à vendre (max: ${fmt(value,0)} €)`:`Parts à vendre (max: ${a.parts})`}
+                          </div>
+                          <input type="number" step="any" min="0" value={sellVal} onChange={e=>setSellVal(e.target.value)}
+                            placeholder={sellMode==="eur"?fmt(value,0):String(a.parts)}
+                            style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid #D1D5DB",fontSize:14,fontWeight:600,outline:"none"}}/>
+                        </div>
+                        {sellVal&&(
+                          <div style={{background:"#FFF1F2",borderRadius:8,padding:"8px 10px",marginBottom:8,fontSize:11,color:"#991B1B"}}>
+                            Parts cédées : {sellMode==="eur"?fmt((parseFloat(sellVal)||0)/price,4):sellVal}
+                            {" · "}Valeur : {fmt(sellMode==="eur"?parseFloat(sellVal):(parseFloat(sellVal)||0)*price,0)} €
+                          </div>
+                        )}
+                        <button onClick={()=>executeSell(a)}
+                          style={{...btnBase,width:"100%",background:"#DC2626",color:"white",fontSize:13,padding:"9px"}}>
+                          Confirmer la vente
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Panel Editer */}
+                    {isEdit&&(
+                      <div style={{borderTop:"1px solid #F3F4F6",marginTop:10,paddingTop:10}}>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                          <div>
+                            <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>Prix manuel (€)</div>
+                            <input type="number" step="any" value={a.priceManual||""} onChange={e=>setAssets(prev=>prev.map(x=>x.id===a.id?{...x,priceManual:parseFloat(e.target.value)||0}:x))}
+                              placeholder="Fallback si API échoue"
+                              style={{width:"100%",padding:"7px 8px",borderRadius:6,border:"1px solid #D1D5DB",fontSize:13,outline:"none"}}/>
+                          </div>
+                          <div>
+                            <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>Cible %</div>
+                            <input type="number" min={0} max={100} value={a.target} onChange={e=>setAssets(prev=>prev.map(x=>x.id===a.id?{...x,target:Number(e.target.value)}:x))}
+                              style={{width:"100%",padding:"7px 8px",borderRadius:6,border:"1px solid #D1D5DB",fontSize:13,outline:"none"}}/>
+                          </div>
+                        </div>
+                        <button onClick={()=>{if(confirm("Supprimer cet actif ?"))setAssets(prev=>prev.filter(x=>x.id!==a.id));setEditId(null);}}
+                          style={{...btnBase,width:"100%",background:"#FFF1F2",color:"#DC2626",border:"1px solid #FECDD3",padding:"7px"}}>
+                          Supprimer cet actif
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+
+      {/* Ajouter */}
+      {!addMode?(
+        <button onClick={()=>setAddMode(true)}
+          style={{width:"100%",background:"white",border:"2px dashed #D1D5DB",borderRadius:10,padding:"12px",fontSize:13,color:"#9CA3AF",cursor:"pointer"}}>
+          Ajouter un actif
+        </button>
+      ):(
+        <div style={{...card,padding:14}}>
+          <div style={lbl}>Nouvel actif</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+            {[["Nom","name","text","ex: S&P 500"],["Ticker Yahoo","ticker","text","ex: SPY"]].map(([l,f,t,p])=>(
+              <div key={f}>
+                <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>{l}</div>
+                <input type={t} value={newA[f]} onChange={e=>setNewA(a=>({...a,[f]:e.target.value}))} placeholder={p}
+                  style={{width:"100%",padding:"8px",borderRadius:6,border:"1px solid #D1D5DB",fontSize:13,outline:"none"}}/>
+              </div>
+            ))}
+            <div>
+              <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>Devise</div>
+              <select value={newA.currency} onChange={e=>setNewA(a=>({...a,currency:e.target.value}))}
+                style={{width:"100%",padding:"8px",borderRadius:6,border:"1px solid #D1D5DB",fontSize:13}}>
+                <option>EUR</option><option>USD</option>
+              </select>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>Poche</div>
+              <select value={newA.poche} onChange={e=>setNewA(a=>({...a,poche:e.target.value}))}
+                style={{width:"100%",padding:"8px",borderRadius:6,border:"1px solid #D1D5DB",fontSize:13}}>
+                {POCHES.map(p=><option key={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>Cible %</div>
+              <input type="number" value={newA.target} onChange={e=>setNewA(a=>({...a,target:Number(e.target.value)}))}
+                style={{width:"100%",padding:"8px",borderRadius:6,border:"1px solid #D1D5DB",fontSize:13,outline:"none"}}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>Couleur</div>
+              <input type="color" value={newA.color} onChange={e=>setNewA(a=>({...a,color:e.target.value}))}
+                style={{width:"100%",height:36,padding:2,borderRadius:6,border:"1px solid #D1D5DB",cursor:"pointer"}}/>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>{if(!newA.name||!newA.ticker)return;const id=newA.ticker.toLowerCase().replace(/[^a-z0-9]/g,"");setAssets(p=>[...p,{...newA,id,fullName:newA.name,parts:0,pru:0,priceManual:0}]);setNewA({name:"",ticker:"",currency:"EUR",poche:"CTO",target:0,color:"#6B7280"});setAddMode(false);}}
+              style={{...btnBase,flex:1,background:"#1A1A2E",color:"white"}}>Ajouter</button>
+            <button onClick={()=>setAddMode(false)} style={{...btnBase,background:"#F9FAFB",color:"#374151",border:"1px solid #E5E7EB"}}>Annuler</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ONGLET STRATEGIE ────────────────────────────────────────────────────────
+function TabStrategie() {
+  const [sub, setSub] = useState(0);
+  const subs = ["Règles","Cycles","Coûts"];
+
+  const COSTS = [
+    {p:"PEA Fortuneo · 2 ordres/mois",    a1:8,  a5:8,   n:"0,35% sur 200€ x 12"},
+    {p:"CTO TR · MSTR ordre limite",       a1:13, a5:13,  n:"Spread+FX ~0,25% · ~10/an"},
+    {p:"CTO TR · spread URNU (pire cas)", a1:4,  a5:4,   n:"3 cts/part · 187€ x 12"},
+    {p:"CTO TR · spread VVMX (pire cas)", a1:2,  a5:2,   n:"2 cts/part · 125€ x 12"},
+    {p:"CTO TR · plans auto",             a1:0,  a5:0,   n:"Gratuit sur TR"},
+    {p:"BTC OKX · maker + réseau",        a1:18, a5:18,  n:"0,08% + ~1€ x 12"},
+    {p:"TER ETF · frais gestion",         a1:32, a5:158, n:"Croît avec le capital"},
+  ];
+  const t1=COSTS.reduce((s,c)=>s+c.a1,0), t5=COSTS.reduce((s,c)=>s+c.a5,0);
+
+  const RULES = [
+    {label:"PEA · Fortuneo",color:"#2563EB",rules:["Ordre 1 gratuit <=500€ · Ordre 2 à 0,35% (~0,70€)","Mensuel : 300€ PUST + 200€ PAEEM","Ne jamais retirer — antériorité fiscale préservée"]},
+    {label:"CTO · Trade Republic",color:"#D97706",rules:["MSTR : ordre limite 15h30-17h30 · FX ~0,12% intégré","URNU + VVMX : plans auto mensuels gratuits","Seuil ordre limite vs plan auto : 1 300€/ordre","Cash rémunéré 2-3% brut · déployable instantanément","Actions entières uniquement · jamais de fractions"]},
+    {label:"BTC · OKX → Ledger",color:"#EA580C",rules:["Achat OKX ordre limite maker (0,08%) · ~1,50€/opération","Retrait immédiat vers Ledger · jamais laisser sur exchange","Clés privées sous ta responsabilité · souveraineté absolue","BTC hors bilan — détention souveraine hors système"]},
+  ];
+
+  const now=new Date();
+  const moisEcoules=Math.floor((now-HALVING_DATE)/(1000*60*60*24*30.5));
+  const pct=Math.min(100,Math.round(moisEcoules/48*100));
+  const phases=[{max:6,label:"Accumulation",color:"#2563EB"},{max:18,label:"Hausse",color:"#16A34A"},{max:24,label:"Parabolique",color:"#D97706"},{max:36,label:"Baisse",color:"#DC2626"},{max:48,label:"Creux",color:"#7C3AED"}];
+  const currentPhase=phases.find(p=>moisEcoules<p.max)||phases[phases.length-1];
+
+  return(
+    <div>
+      <div style={{display:"flex",gap:6,marginBottom:14}}>
+        {subs.map((s,i)=>(
+          <button key={i} onClick={()=>setSub(i)} style={{flex:1,background:sub===i?"#1A1A2E":"white",color:sub===i?"white":"#6B7280",border:`1px solid ${sub===i?"#1A1A2E":"#E5E7EB"}`,borderRadius:8,padding:"8px",fontSize:11,fontWeight:sub===i?600:400,cursor:"pointer"}}>
+            {s}
+          </button>
+        ))}
+      </div>
+
+      {sub===0&&(
+        <div>
+          {RULES.map((r,ri)=>(
+            <div key={ri} style={{...card,borderLeft:`3px solid ${r.color}`,padding:14,marginBottom:10}}>
+              <div style={{fontSize:12,fontWeight:700,color:r.color,marginBottom:10,letterSpacing:0.5}}>{r.label}</div>
+              {r.rules.map((rl,i)=>(
+                <div key={i} style={{display:"flex",gap:8,padding:"7px 0",borderTop:"1px solid #F3F4F6"}}>
+                  <div style={{color:r.color,flexShrink:0,fontSize:11}}>—</div>
+                  <div style={{fontSize:12,color:"#374151",lineHeight:1.6}}>{rl}</div>
+                </div>
+              ))}
+            </div>
+          ))}
+          <div style={{...card,padding:14,background:"#F0FDF4",border:"1px solid #BBF7D0"}}>
+            <div style={{fontSize:10,letterSpacing:3,color:"#15803D",textTransform:"uppercase",marginBottom:10}}>Calendrier mensuel</div>
+            {[
+              {t:"1er du mois",a:"Vérifier mNAV sur strategy.com · 15 secondes",c:"#D97706"},
+              {t:"1er du mois",a:"Virer 500€ Fortuneo PEA · 300€ PUST + 200€ PAEEM",c:"#2563EB"},
+              {t:"1er du mois",a:"mNAV < 1,3 → accumuler cash TR · déployer sur MSTR dès que la fenêtre s'ouvre (15h30-17h30)",c:"#D97706"},
+              {t:"Fin de mois",a:"Si mNAV > 1,3 tout le mois → BTC via OKX + retrait Ledger",c:"#EA580C"},
+              {t:"Auto",a:"Plans URNU (187€) + VVMX (125€) exécutés par TR automatiquement",c:"#DC2626"},
+              {t:"Opportuniste",a:"Virer depuis compte bancaire si mNAV < 1,1 ou crash violent",c:"#16A34A"},
+            ].map((item,i)=>(
+              <div key={i} style={{display:"flex",gap:12,padding:"7px 0",borderTop:i>0?"1px solid #DCFCE7":"none"}}>
+                <div style={{fontSize:10,fontWeight:600,color:item.c,minWidth:80,flexShrink:0}}>{item.t}</div>
+                <div style={{fontSize:12,color:"#166534",lineHeight:1.5}}>{item.a}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {sub===1&&(
+        <div>
+          <div style={{...card,padding:14,marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{fontSize:14,fontWeight:700,color:currentPhase.color}}>{currentPhase.label}</div>
+              <div style={{fontSize:12,color:"#9CA3AF"}}>Mois {moisEcoules}/48</div>
+            </div>
+            <div style={{position:"relative",height:8,background:"#F3F4F6",borderRadius:4,overflow:"hidden",marginBottom:6}}>
+              {[{p:12,c:"#2563EB"},{p:37,c:"#16A34A"},{p:50,c:"#D97706"},{p:75,c:"#DC2626"},{p:100,c:"#7C3AED"}].map((seg,i,arr)=>(
+                <div key={i} style={{position:"absolute",left:`${i===0?0:arr[i-1].p}%`,width:`${seg.p-(i===0?0:arr[i-1].p)}%`,height:"100%",background:seg.c,opacity:0.3}}/>
+              ))}
+              <div style={{position:"absolute",left:`${pct}%`,top:0,width:3,height:"100%",background:currentPhase.color,transform:"translateX(-50%)",borderRadius:2}}/>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#9CA3AF"}}>
+              <span>Avr. 2024</span><span>Sommet ~oct. 2025</span><span>Creux ~2026</span><span>Avr. 2028</span>
+            </div>
+          </div>
+          {[
+            {title:"Phase de vente — euphorie",color:"#DC2626",bg:"#FFF1F2",border:"#FECDD3",
+              rules:["12-18 mois après halving · médias euphoriques · phase parabolique","Vendre progressivement 30-50% de MSTR sur TR","Garder BTC Ledger intact — jamais vendu à travers les cycles","Stopper plans auto URNU et VVMX · laisser en cash TR","Ne pas chercher le pic exact — vendre dans la zone"]},
+            {title:"Phase d'accumulation — capitulation",color:"#16A34A",bg:"#F0FDF4",border:"#BBF7D0",
+              rules:["-50 à -70% depuis le sommet · capitulation totale","Réinjecter massivement via stratégie mNAV","Reprendre plans auto URNU + VVMX","Virer depuis compte bancaire pour tir ciblé","Ne pas chercher le creux exact — acheter dans la zone"]},
+          ].map((s,si)=>(
+            <div key={si} style={{...card,padding:14,marginBottom:10,background:s.bg,border:`1px solid ${s.border}`}}>
+              <div style={{fontSize:11,fontWeight:700,color:s.color,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>{s.title}</div>
+              {s.rules.map((r,i)=>(
+                <div key={i} style={{display:"flex",gap:8,padding:"6px 0",borderTop:i>0?`1px solid ${s.border}`:"none"}}>
+                  <div style={{color:s.color,flexShrink:0,fontSize:11}}>—</div>
+                  <div style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{r}</div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {sub===2&&(
+        <div style={{...card,padding:14}}>
+          <div style={{fontSize:10,letterSpacing:3,color:"#9CA3AF",textTransform:"uppercase",marginBottom:10}}>Coûts annuels pire cas · 1 250€/mois</div>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <thead><tr style={{background:"#F9FAFB"}}>
+              {["Poste","Détail","An 1","An 5"].map((h,i)=>(
+                <th key={i} style={{padding:"7px 8px",fontSize:10,color:"#6B7280",textAlign:i<2?"left":"right",borderBottom:"1px solid #E5E7EB"}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {COSTS.map((row,i)=>(
+                <tr key={i} style={{borderBottom:"1px solid #F3F4F6"}}>
+                  <td style={{padding:"8px",fontSize:11,color:"#374151"}}>{row.p}</td>
+                  <td style={{padding:"8px",fontSize:10,color:"#9CA3AF"}}>{row.n}</td>
+                  <td style={{padding:"8px",fontSize:12,color:row.a1===0?"#16A34A":"#374151",textAlign:"right",fontWeight:500}}>{row.a1===0?"Gratuit":`${row.a1}€`}</td>
+                  <td style={{padding:"8px",fontSize:12,color:row.a5===0?"#16A34A":"#374151",textAlign:"right",fontWeight:500}}>{row.a5===0?"Gratuit":`${row.a5}€`}</td>
+                </tr>
+              ))}
+              <tr style={{background:"#F0FDF4",borderTop:"2px solid #BBF7D0"}}>
+                <td style={{padding:"10px 8px",fontSize:13,fontWeight:700,color:"#166534"}} colSpan={2}>TOTAL pire cas</td>
+                <td style={{padding:"10px 8px",fontSize:15,fontWeight:800,color:"#16A34A",textAlign:"right"}}>{t1}€</td>
+                <td style={{padding:"10px 8px",fontSize:15,fontWeight:800,color:"#16A34A",textAlign:"right"}}>{t5}€</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+// ── APP PRINCIPALE ──────────────────────────────────────────────────────────
+const NAV = [{id:0,label:"Accueil"},{id:1,label:"Investir"},{id:2,label:"Tracker"},{id:3,label:"Stratégie"}];
+
+function App() {
+  const [tab, setTab] = useState(0);
+  const [assets, setAssets] = useState(()=>load("tracker_assets_v2", ASSETS_DEFAULT.map(a=>({...a,parts:0,pru:0,priceManual:0}))));
+  const [prices, setPrices] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [mnav, setMnav] = useState(null);
+  const [mnavLoading, setMnavLoading] = useState(false);
+
+  useEffect(()=>{ save("tracker_assets_v2",assets); },[assets]);
+
+  const refreshMnav = useCallback(async (mstrPrice, btcPrice) => {
+    setMnavLoading(true);
+    // Méthode 1 : Calcul exact basé sur données brutes (priorité)
+    if (mstrPrice && btcPrice) {
+      const v1 = await fetchMnavCalcAuto(mstrPrice, btcPrice);
+      if (v1) { setMnav(v1); setMnavLoading(false); return; }
+    }
+    // Fallback : calcul simplifié
+    if (mstrPrice && btcPrice) {
+      const v2 = await fetchMnavCalc(mstrPrice, btcPrice);
+      if (v2) { setMnav(v2); }
+    }
+    setMnavLoading(false);
+  },[]);
+
+  const refreshPrices = useCallback(async () => {
+    setLoading(true);
+    const newPrices = {};
+    console.time("refreshPrices");
+
+    try {
+      // Fetch BTC from CoinGecko (free, ~1s)
+      console.time("BTC");
+      const btcPrice = await fetchBtcPrice();
+      console.timeEnd("BTC");
+      if (btcPrice) newPrices["btc"] = btcPrice;
+
+      // Fetch all other prices via yfinance
+      console.time("Other prices");
+      const tickersMap = {
+        pust: "PUST.PA",
+        paeem: "PAEEM.PA",
+        mstr: "MIGA.F",
+        urnu: "URNU.MI",
+        vvmx: "VVMX.DE"
+      };
+      const r = await fetch(`${API_BASE}/api/prices`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tickers: tickersMap })
+      });
+      console.timeEnd("Other prices");
+
+      if (r.ok) {
+        const prices = await r.json();
+        Object.assign(newPrices, prices);
+      }
+    } catch (e) {
+      console.error("Price fetch error:", e);
+    }
+
+    setPrices(newPrices);
+    setLoading(false);
+
+    // Calcul mNAV
+    const mstrPrice = newPrices["mstr"];
+    const btcPrice = newPrices["btc"];
+    if (mstrPrice || btcPrice) refreshMnav(mstrPrice, btcPrice);
+  },[assets, refreshMnav]);
+
+  // Chargement automatique au démarrage
+  useEffect(() => {
+    refreshPrices();
+  }, []); // eslint-disable-line
+
+  return (
+    <div style={{background:"#F0F2F5",minHeight:"100vh",maxWidth:480,margin:"0 auto",display:"flex",flexDirection:"column"}}>
+      <div style={{flex:1,padding:"16px 14px 76px",overflowY:"auto"}}>
+        {tab===0&&<TabAccueil assets={assets} prices={prices} loading={loading} mnav={mnav} mnavLoading={mnavLoading} onRefreshAll={()=>{refreshPrices();}} onRefreshMnav={()=>refreshMnav(prices?.mstr, prices?.btc)}/>}
+        {tab===1&&<TabInvestir mnav={mnav}/>}
+        {tab===2&&<TabTracker assets={assets} setAssets={setAssets} prices={prices}/>}
+        {tab===3&&<TabStrategie/>}
+      </div>
+      {/* Navigation */}
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"white",borderTop:"1px solid #E5E7EB",display:"flex",zIndex:100,paddingBottom:"env(safe-area-inset-bottom)"}}>
+        {NAV.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,background:"none",border:"none",cursor:"pointer",padding:"10px 0 8px",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+            <div style={{width:4,height:4,borderRadius:2,background:tab===t.id?"#1A1A2E":"transparent",marginBottom:2}}/>
+            <span style={{fontSize:11,fontWeight:tab===t.id?700:400,color:tab===t.id?"#1A1A2E":"#9CA3AF"}}>{t.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
