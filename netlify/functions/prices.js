@@ -15,17 +15,13 @@ function httpGet(url, headers = {}, maxRedirects = 5) {
   });
 }
 
-// Boursorama symbols for Euronext Paris ETFs
+// Boursorama symbols — all assets via single source
 const BOURSORAMA_SYMBOLS = {
-  pust:  "1rTPUST",
-  paeem: "1rTPAEEM"
-};
-
-// Stooq tickers for other assets
-const STOOQ_TICKERS = {
-  mstr: "mstr.us",   // USD — will be converted via FX
-  urnu: "urnu.de",   // EUR
-  vvmx: "vvmx.de"    // EUR
+  pust:  { sym: "1rTPUST",  currency: "EUR" },
+  paeem: { sym: "1rTPAEEM", currency: "EUR" },
+  urnu:  { sym: "1zURNU",   currency: "EUR" },
+  vvmx:  { sym: "1zVVMX",   currency: "EUR" },
+  mstr:  { sym: "MSTR",     currency: "USD" }  // NASDAQ price in USD
 };
 
 async function fetchBoursoramaPrice(symbol) {
@@ -41,20 +37,6 @@ async function fetchBoursoramaPrice(symbol) {
   }
 }
 
-async function fetchStooqPrice(ticker) {
-  try {
-    const url = `https://stooq.com/q/l/?s=${ticker}&f=sd2t2ohlcv&h&e=csv`;
-    const text = await httpGet(url);
-    const lines = text.trim().split('\n');
-    if (lines.length < 2) return null;
-    const cols = lines[1].split(',');
-    const close = parseFloat(cols[6]);
-    return close > 0 ? close : null;
-  } catch (e) {
-    console.error(`Stooq error for ${ticker}:`, e.message);
-    return null;
-  }
-}
 
 async function fetchEurUsd() {
   try {
@@ -100,7 +82,7 @@ exports.handler = async (event, context) => {
       toFetch.push(assetId);
     }
 
-    // Fetch USD→EUR rate once if MSTR needs it
+    // Fetch USD→EUR rate if MSTR needs conversion
     let usdToEur = null;
     if (toFetch.includes('mstr')) {
       usdToEur = await fetchEurUsd();
@@ -110,11 +92,9 @@ exports.handler = async (event, context) => {
       let price = null;
 
       if (assetId in BOURSORAMA_SYMBOLS) {
-        price = await fetchBoursoramaPrice(BOURSORAMA_SYMBOLS[assetId]);
-      } else if (assetId in STOOQ_TICKERS) {
-        price = await fetchStooqPrice(STOOQ_TICKERS[assetId]);
-        // Convert USD to EUR for MSTR
-        if (assetId === 'mstr' && price && usdToEur) {
+        const { sym, currency } = BOURSORAMA_SYMBOLS[assetId];
+        price = await fetchBoursoramaPrice(sym);
+        if (price && currency === 'USD' && usdToEur) {
           price = Math.round(price * usdToEur * 100) / 100;
         }
       }
