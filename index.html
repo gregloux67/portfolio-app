@@ -859,7 +859,7 @@ const NAV = [{id:0,label:"Accueil"},{id:1,label:"Investir"},{id:2,label:"Tracker
 function App() {
   const [tab, setTab] = useState(0);
   const [assets, setAssets] = useState(()=>load("tracker_assets_v2", ASSETS_DEFAULT.map(a=>({...a,parts:0,pru:0,priceManual:0}))));
-  const [prices, setPrices] = useState({});
+  const [prices, setPrices] = useState(()=>load("last_prices", {}));
   const [loading, setLoading] = useState(false);
   const [mnav, setMnav] = useState(null);
   const [mnavLoading, setMnavLoading] = useState(false);
@@ -918,6 +918,7 @@ function App() {
     }
 
     setPrices(newPrices);
+    save("last_prices", newPrices);
     setLoading(false);
 
     // Calcul mNAV
