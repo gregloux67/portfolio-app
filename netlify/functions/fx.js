@@ -1,4 +1,4 @@
-import fetch from 'node-fetch';
+const fetch = globalThis.fetch || require('node-fetch');
 
 export default async (req, context) => {
   try {

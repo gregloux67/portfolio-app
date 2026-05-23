@@ -1,4 +1,5 @@
-import fetch from 'node-fetch';
+// Use native fetch on Node 18+, fallback to node-fetch
+const fetch = globalThis.fetch || require('node-fetch');
 
 const ETF_TICKERS = {
   pust: "PUST.PA",
