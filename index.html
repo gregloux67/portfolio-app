@@ -930,7 +930,7 @@ function App() {
   // Chargement automatique au démarrage + refresh toutes les 60s
   useEffect(() => {
     refreshPrices();
-    const interval = setInterval(refreshPrices, 60000);
+    const interval = setInterval(refreshPrices, 30000);
     return () => clearInterval(interval);
   }, []); // eslint-disable-line
 
