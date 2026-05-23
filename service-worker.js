@@ -1,4 +1,4 @@
-const CACHE_ASSETS = "portefeuille-assets-v7";
+const CACHE_ASSETS = "portefeuille-assets-v8";
 const ASSETS_TO_CACHE = ["/", "/index.html", "/manifest.json"];
 
 self.addEventListener("install", e => {
@@ -22,9 +22,11 @@ self.addEventListener("activate", e => {
 });
 
 self.addEventListener("fetch", e => {
-  // Skip non-GET and Netlify Functions (always fresh)
   if (e.request.method !== "GET") return;
   const url = new URL(e.request.url);
+
+  // Only cache same-origin static assets — never external APIs
+  if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/.netlify/")) return;
 
   // Static assets: cache-first
