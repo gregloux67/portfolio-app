@@ -62,8 +62,11 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def fetch_etf_price(self, ticker):
-        """Fetch ETF price from Yahoo Finance via yfinance"""
-        return self.fetch_yahoo_price(ticker)
+        """Fetch ETF price - try Yahoo, then Google Finance"""
+        price = self.fetch_yahoo_price(ticker)
+        if price:
+            return price
+        return self.fetch_google_finance_price(ticker)
 
     def fetch_mnav_strategy(self):
         """Scrape mNAV from strategy.com using Playwright"""
@@ -115,12 +118,41 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 price = result.get('price', {}).get('regularMarketPrice', {}).get('raw')
                 if price:
                     return price
-                # Fallback to currentPrice
                 price = result.get('price', {}).get('currentPrice', {}).get('raw')
                 return price
         except Exception as e:
             print(f"Error fetching Yahoo price for {ticker}: {e}", file=sys.stderr)
             return None
+
+    def fetch_google_finance_price(self, ticker):
+        """Fallback: Fetch price from Google Finance"""
+        try:
+            url = f"https://www.google.com/finance/quote/{ticker}"
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            with urllib.request.urlopen(req, timeout=5) as response:
+                html = response.read().decode('utf-8')
+                import re
+                # Extract price from Google Finance HTML
+                match = re.search(r'"regularMarketPrice"["\']?\s*:\s*([0-9.]+)', html)
+                if match:
+                    return float(match.group(1))
+                # Alternative patterns for different HTML structures
+                match = re.search(r'data-value="([0-9.]+)"[^>]*class="[^"]*YMlKec[^"]*"', html)
+                if match:
+                    return float(match.group(1))
+                # Last resort: look for any number in a price-like context
+                matches = re.findall(r'([0-9]{1,4}\.[0-9]{2})', html)
+                if matches:
+                    # Return the first substantial price (not 0.00 or very small)
+                    for m in matches:
+                        val = float(m)
+                        if val > 0.1:
+                            return val
+        except Exception as e:
+            print(f"Error fetching Google price for {ticker}: {e}", file=sys.stderr)
+        return None
 
     def calculate_mnav(self, mstr_price_usd, btc_price_usd, btc_holdings, market_cap_usd, debt_usd, pref_usd, cash_usd):
         """Calculate mNAV = (Market Cap + Debt + Pref - Cash) / (BTC Holdings × BTC Price)"""
